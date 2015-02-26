@@ -2,10 +2,12 @@
 layout: post
 title: "Vim Remote Make"
 description: ""
-category: 
+category:
 tags: []
 ---
 
+Remote Make
+-----------
 So I'm in a class that requires that I use a linux VM to edit code. Since we are
 sharing this VM between all of the group members, I don't want to jump on there
 and throw my vim config and stuff on the machine. Instead, I've been mounting
@@ -23,11 +25,11 @@ Here's how I did it.
 #!/bin/bash
 oldpath=/home/cs423/$1
 newpath=/Users/dz0004455/programming/cs423/remote/$1
-ssh cs423@sp15-cs423-g20.cs.illinois.edu "cd ~/$1 && make"  2>&1 | sed -e "s|$oldpath|$newpath|g"
+ssh cs423@$REMOTE_HOST "cd ~/$1 && make"  2>&1 | sed -e "s|$oldpath|$newpath|g"
 
 {% endhighlight %}
 
-This script runs the make program remotely (makes los of assumptions about
+This script runs the make program remotely (makes lots of assumptions about
 directory structure, but that's totally fine). Then it pipes the output through
 sed to replace all the paths make spits out on the remote machine with the paths
 on the local machine, so that vim can open the files with errors correctly. If
@@ -44,3 +46,30 @@ anxious about the inevitable slow make every time I save the file. Since I'm
 using neovim I can also use the wonderful
 [ neomake ]( https://github.com/benekastah/neomake ) plugin to run builds
 asynchronously and populate quickfix.
+
+avoiding sshfs
+--------------
+After using this for a few hours on a less than stellar internet connection, I
+got a little tired of sshfs dropping my connections, so I added two more "scripts"
+to this mix.
+
+423get
+{% highlight bash %}
+rsync -a cs423@$REMOTE_HOST:/home/cs423/$1/ ~/programming/cs423/sync/$1/
+{% endhighlight %}
+
+423push
+{% highlight bash %}
+rsync -a ~/programming/cs423/sync/$1/ cs423@$REMOTE_HOST:/home/cs423/$1/
+{% endhighlight %}
+
+Then, in vim:
+
+{% highlight vim %}
+:autocmd BufWrite * :Dispatch! 423push MP2
+{% endhighlight %}
+
+so files get pushed back (via rsync) anytime I write. Again, could have used
+neomake for the asynchronous behavior (instead of dispatch), but the dispatch
+solution is slightly easier to type.
+
