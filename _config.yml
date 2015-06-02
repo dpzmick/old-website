@@ -1,10 +1,11 @@
 # Site settings
 title:       dpzmick.com
-email:       dpzmick@gmail.com
+email:
 author:      David Zmick
 description: "Just some dude's blog"
 baseurl:     ""
 url:         "http://dpzmick.com"
+resume:      "http://dpzmick.com/resume/resume.pdf"
 
 # Google analytics
 google_analytics:
@@ -24,7 +25,7 @@ github_username: dpzmick
 stackoverflow_id:
 twitter_username:
 google_plus_id:
-linkedin_username:
+linkedin_username: dpzmick
 bitcoin_url:
 paypal_url:
 flattr_button:
