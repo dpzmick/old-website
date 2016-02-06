@@ -207,8 +207,11 @@ OTHER_FILES = Makefile \
 
 REFERENCE_IMPL=mp1
 
--include ../deploy.make.common
+-include ../Deploy.mk
 {% endhighlight %}
+
+Finally, stick a file in `/mp1` called `code_header` that defines the header to
+stick on each code file.
 
 Now, running `make` in the `/mp1` directory creates the folder `deploy`
 containing the deployable code, and a reference implementation for the
