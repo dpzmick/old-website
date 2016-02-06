@@ -110,7 +110,7 @@ words, to generate a file `deploy/test.c` we would start with the file
 
 We do the same thing for `*.h` files.
 
-Generating a reference implementaton is also pretty straightforward:
+Generating a reference implementation is also pretty straightforward:
 
 {% highlight make %}
 $(DEPLOY_DIR)/%-reference:
