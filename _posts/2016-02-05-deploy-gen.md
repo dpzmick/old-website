@@ -95,7 +95,7 @@ deploy directory. Then, we have to make sure the file's directory actually
 exists (we might have code in `libs/weirdthing/cool_file.c`). Then, the code
 runs through `unifdef` and a formatter, we stick the header on it, and pipe it
 through `dos2unix`. That was easy! Well, not quite. If you aren't familiar with
-GNU make, this line might throw you off a bit:
+GNU make, this bit might throw you off a bit:
 
 {% highlight make %}
 $(@:$(DEPLOY_DIR)/%=$(SOURCE_DIR)/%)
@@ -104,7 +104,7 @@ $(@:$(DEPLOY_DIR)/%=$(SOURCE_DIR)/%)
 This is a patterned replacement ([Text
 Function](https://www.gnu.org/software/make/manual/html_node/Text-Functions.html)
 in make terminology). It basically says, take the string `$@` (the target of the
-rule), and replace the pattern `$(DEPLOY_DIR)` with `$(SOURCE_DIR)`. In other
+rule), and replace the text `$(DEPLOY_DIR)` with `$(SOURCE_DIR)`. In other
 words, to generate a file `deploy/test.c` we would start with the file
 `solution/test.c`
 
