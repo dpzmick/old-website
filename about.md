@@ -8,7 +8,7 @@ I'm a Computer Science student at the University of Illinois interested in
 programming languages, operating systems, high performance computing, and quite
 a few other things.
 
-Check out my [undergraduate senior thesis](http://dpzmick.com/ugrad-thesis/paper.pdf").
+Check out my [undergraduate senior thesis](http://dpzmick.com/ugrad-thesis/paper.pdf).
 
 After graduation I am planning to work for [Jump
 Trading](http://jumptrading.com).
