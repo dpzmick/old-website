@@ -218,7 +218,7 @@ Aggressive function inlining gives me lots of freedom in my code generation.
 I can generate code which is totally inefficient, then inline everything and let the compiler do some of its magic.
 Of course, this isn't a general rule, but for this problem the generated code is highly uniform, doesn't do much with memory (other than reading from `readonly` images), and has a few other compiler freindly properties.
 At the end of the day, LLVM is doing a pretty good job turning my functional style code into a big fat loop and eliminating redundant computations.
-If you interested in looking at the optimized sobel LLVM module, here it is: [gist](https://gist.github.com/dpzmick/95587dbb2972e256e51b888add3364a6).
+If you're interested in looking at the optimized sobel LLVM module, here it is: [gist](https://gist.github.com/dpzmick/95587dbb2972e256e51b888add3364a6).
 
 ### Numbers
 To benchmark this code, I compared the JITed code with an implementation of the exact same thing written directly in Rust.
