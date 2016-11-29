@@ -24,6 +24,18 @@ html, body {
 img {
   width: auto;
   max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  display: block;
+}
+
+img + em{
+  width: auto;
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  display: block;
+  text-align: center;
 }
 
 .site-wrap {

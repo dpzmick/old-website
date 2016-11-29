@@ -66,29 +66,52 @@ what makes audio software complicated?
 One word: timing.
 Many pieces of audio software and hardware work together to produce audio.
 If that audio isn't produced at the right time, the music you are listening to, movie you are watching, game you are playing, instrument you are playing, etc, will have loud pops and crackles and various other unpleasantries.
+Glitches and bad sounds are *very bad*.
+Imagine being a musician, with a computer, hooked to a very high powered speaker system.
+These pops and glitches could damage your speakers, or maybe even damage your audience's ears.
 
 # The event loop waits for no one
-Computer audio systems are complicated, but, if we take all of the audio drivers, OS support, and audio library implementation details as a black box, audio code has some pretty simple properties.
-Almost all audio libraries share a pretty simple interface: The user provides an audio processing function, and the audio library calls the function at all the right times.
-Each call to this function represents a fragment in time.
-This magical audio function often has two responsibilities:
+Most audio software (as far as I know) tends to follow the following pattern: There is some thread that generates samples in realtime, and a bunch of other threads that deal with everything else.
+Often times (but not always), the realtime audio thread is provided by a library or some other software system.
+The library calls a user provided callback function (on this thread) to get the next batch of samples it needs to deliver to the audio card.
+The audio library figures out how often it needs to call this callback function, and how many samples to request each time it calls the function.
+This is all pretty simple, but, if the function ever fails to generate the next list of samples quickly enough, we get glitches and pops and other very bad things.
+In order to be absolutely certain that we always fail to deliver the next list of samples quickly enough, we must make sure that everything we do in our callback function will *always* complete quickly and never miss the deadline to produce new samples.
+Unfortunately, this constraint eliminates a couple of things we often take for granted:
 
-1. Handle any incoming audio (and midi, depending on the library) events which are associated with the current fragment in time
-2. Generate the needed output samples (and maybe midi signals) for this slice in time.
+* Synchronization through locking
+* Operations with bad worst case performance
+* Memory allocation with standard allocators
+* Many more things
 
-Each time the audio library calls our callback function, we must provide our output samples quickly enough.
-If we fail to meet the deadline for the audio library, we will cause "x-runs"/"glitches"/"annoying pops", which basically means that the audio card will emit some really unpleasant sound.
-If the audio card is hooked to a large PA system, these sorts of errors could damage speakers, or make a concert very unpleasant for lots of people.
-In non-live settings, badly behaved audio applications can still be very, very, very annoying to their users.
+Lets examine each of these.
+First, we can't use locks or semaphores or conditional variables or any of those kinds of things inside of our realtime callback function.
+The reason for this is simple: if one of our other threads acquires the lock, it might not let go of the lock fast enough for us to generate our samples.
+You might be able to be very careful about how quickly you hold locks in your non-realtime thread, such that locking never causes a problem.
+If you are smart enough to work [all](https://en.wikipedia.org/wiki/Priority_inversion) [of](http://lists.apple.com/archives/Coreaudio-api/2001/May/msg00032.html) [these](https://en.wikipedia.org/wiki/Deadlock) [details](http://stackoverflow.com/a/4296991) out, you can maybe pull it off, but I'm not that smart.
 
-This means that, inside of our realtime audio code (the audio event function), we need to make sure we never do anything that might cause us to miss our deadline.
-Unfortunately, many things we typically take for granted have behavior which sometimes would cause us to miss the deadline:
+The second item on our list is "operations with bad worst case performance."
+The classical example of this is insertion into a vector.
+Most of the time, inserting an element into a vector is a constant time (good, fast) operation.
+But, every once and a while, the vector needs to reallocate itself and make space for new elements (often by doubling).
+If we double the size every time, this means, on average, our insertion time is constant (because once every $N$ insertions we do an $O(N)$ operation, so average is $O(1)$), but that $O(N)$ operation could take a terribly long time and might cause us to miss our deadline.
 
-## Synchronization through locking
-## Memory allocation
-## Amortized reallocations
-This is usually so it is eliminated anyway but lets discuss anyway
+Lastly, I've listed memory allocation with standard allocators (this means the `new` keyword or the `malloc` function).
+Standard library allocators are usually thread safe.
+They often get this safety with locks, but we can't use those!
+Memory allocation cost is also very non-deterministic; allocation algorithms rarely make any time guarantees.
+Additionally, a memory allocator might make system calls to ask the operating system for additional pages of memory.
+Who knows what kind of things the OS might have to do (kernel locks?).
 
+side note 1: You can probably get away with memory allocation, if you write your own allocator, and control all of the details.
+A fixed size block allocator would probably not give you any problems at all.
+
+side note 2: applications which use large amounts of memory should make sure that all of the pages the realtime thread needs to access are kept in physical memory (`mlock` on linux) because we most certainly do not want page faults happening to access memory in the realtime thread
+
+I've glossed over many details in this section (this post is getting long), but, the [cppcon video](https://www.youtube.com/watch?v=boPEO2auJj4), and [this excellent post](http://www.rossbencina.com/code/real-time-audio-programming-101-time-waits-for-nothing) both cover more details, if you are interested.
+
+
+# rust stuff
 
 {% highlight rust %}
 #![feature(arc_counts)]
@@ -201,3 +224,4 @@ fn main() {
     }
 }
 {% endhighlight %}
+
