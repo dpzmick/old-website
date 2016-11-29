@@ -7,41 +7,65 @@ summary: "Cleaning up after yourself in realtime"
 Recently, I've been working on developing a synthesizer (the kind that makes sounds) in Rust.
 While trying to figure out how to safely send messages between the realtime audio processing thread and other threads (ui thread, disk I/O thread, etc), I stumbled across an excellent talk which validated my attempt to use reference counting to help ease the situation.
 The talk is [on youtube](https://www.youtube.com/watch?v=boPEO2auJj4), I highly recommend it.
-This post will first motivate the value of a very simple garbage collector in these kinds of applications, and will explain the implementation.
+This post will first explain why I've done what I've done, then I will explain how I'v done it.
 
 # Digital audio
-<!---
-Before delving into the details of audio programming, we need to understand a bit about how computers deal with sound.
-I don't want to go too far in depth (watch the video), but I will give a short and sweet overview here.
-In the "real world," sound/audio is just a vibration of some medium (air, water, whatever) that our ears and brain interpret as sound.
-One way to visualize these waves is "pressure over time," where pressure is the amount of vibration hitting some receiver (the ear) at some instant.
-For a pure sine wave (the simplest sound), sound pressure over looks like this:
+Before diving in to the meat of this post, let me first give a quick overview of digital audio (if you know this stuff, skip this section!)
+For the sake of this post, we will only consider cases where a computer generates audio (we are ignoring recording).
+There are a few important pieces of this equation:
 
-![Sine wave](/img/sound/sine.png)
+1. An audio software system (creates digital audio signals)
+2. A hardware audio card (converts digital audio signals into sound)
+3. Some sort of speakers (these are of course only needed if you actually want to hear anything)
 
-TODO add some example sounds
+To generate audio, the software audio system sends some "samples" to the audio card (more on these in a second).
+The audio card turns these audio samples into some real audio.
+Since we don't really need to understand sampling to get through this post, lets just gloss over it quickly enough to get to the content.
 
-Since this curve is smooth and continuous (has an infinite number of points), we can't exactly represent it in a computer.
-Instead, we measure the current value of the curve at regular intervals.
-Then, when replaying the audio.
--->
+Computers think of audio as long lists of floating point (decimal) numbers.
+These floating point numbers are "sound pressure" over time (see [this page](https://docs.cycling74.com/max5/tutorials/msp-tut/mspdigitalaudio.html) for more)
+Because sound is continuous, we can't record every possibly value.
+Instead, we take measurments of the values at some evenly spaced interval (eg 44100 samples per second, or, one sample every 23ish nanoseconds).
+For example (from wikipedia):
 
-Digital audio is complex.
-If you would like a more compressive explanation, check out the video linked above.
+![Samples](https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/Pcm.svg/500px-Pcm.svg.png)
 
-Computers think of audio as long arrays of floating point numbers (in the simplest case).
-Each one of these floats is called a sample because it is a measurement of the sound wave which some recording device observed at a given time (it took a sample of the wave).
-These samples are evenly spaced.
-To record and play back digital audio samples, we use Analog (sound waves) <-> Digital converters.
+The audio driver takes the samples down into the depths of the hardware and eventually produces sound using some magic I don't really understand.
 
-ADD DIAGRAM HERE
+## Types of audio software
+Okay, so audio software just generates a bunch of numbers and sends them to some magically audio driver the operating system provides, now we need to think about a few different kinds of audio software (this list is by no means complete):
 
-Because sound waves are a continuous thing in nature, we can'hert just directly record what we hear in the real world, store it on a disk somewhere, and replay it (by disk I mean digital disk, since this is exactly how vinyl records work).
-Instead, we store "samples" of the real audio data.
-TODO actually finish explaining this with diagrams and stuff
-TODO what are plugins
-TODO what does the whole ecosystem look like?
-TODO should this be a separate post?
+1. Media players (your browser, whatever you listen to music with, a game perhaps, etc)
+2. Software instruments (think of a virtual piano that makes sounds)
+3. Audio plugins (an equalizer in a music player, effects like distortion/compression/equalization for software instruments)
+4. Software audio subsystems
+
+Media players are pretty self explanatory, but the others might need some explanation.
+Let's start with the next easiest: software instruments.
+These are just pieces of software that can be used to generate sounds.
+Sometimes these are played with external keyboards, and sometimes they are "programmed" with cool user interfaces.
+
+![Drum machine](/img/sound/reason_drums.jpg)
+*Drum machine in some audio software*
+
+Next we come to audio plugins.
+These are pieces of software which take audio as input, transform it in some way, then output the new audio.
+The most familar of these is probably the graphical equalizer, which allows a user to adjust the volume of different frequency ranges (make the bass louder, make the treble quieter):
+
+![equalizer](/img/sound/itunes_eq.jpg)
+
+Finally, we come to the hardest to understand, what I'm calling a software audio subsystem.
+Because there is only one sound card on your system, any audio you are playing on your computer must be mixed together, then sent to the audio card.
+Different operating systems have different pieces of software to perform this task, and most (except OS X) have a few different sets of drivers and mixing software.
+On windows, using the out of the box audio system, I can control levels with this little mixer thing:
+
+![windows mixer](/img/sound/win_mixer.png)
+
+Okay, so all of this doesn't seem so bad.
+what makes audio software complicated?
+One word: timing.
+Many pieces of audio software and hardware work together to produce audio.
+If that audio isn't produced at the right time, the music you are listening to, movie you are watching, game you are playing, instrument you are playing, etc, will have loud pops and crackles and various other unpleasantries.
 
 # The event loop waits for no one
 Computer audio systems are complicated, but, if we take all of the audio drivers, OS support, and audio library implementation details as a black box, audio code has some pretty simple properties.
