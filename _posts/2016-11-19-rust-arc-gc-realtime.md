@@ -85,78 +85,90 @@ If you want to write your own allocator (controlling all of the details) you may
 I've glossed over many, many details in this section (this post is getting long), but, the [cppcon video](https://www.youtube.com/watch?v=boPEO2auJj4), and [this excellent post](http://www.rossbencina.com/code/real-time-audio-programming-101-time-waits-for-nothing) both cover more details, if you are interested.
 
 # Messaging between threads
-The synthesizer I program will produce sounds when keys are pressed on a keyboard.
+The synthesizer program will produce sounds when keys are pressed on a keyboard.
 The audio library I am using delivers all keyboard key presses to the realtime audio callback function at the appropriate times.
-This means that the callback simply checks if it needs to be making any sounds, then uses a precomputed list of samples to generate a sound.
-To modify the properties of the sounds that are produced, the user edits the sound with a user interface.
+The callback function uses a precomputed list of samples to generate sounds when it is told to.
+To modify the properties of the sounds that are produced, the user edits the synthesizer settings with a user interface.
 (note that almost none of this code actually exists yet, so I may write a future post where some of these ideas change)
 
-For this discussion, the threads that we care about are:
-
-1. The realtime audio thread
-2. The UI thread
-
 The fun starts when we think about how to update the precomputed list of samples when the user of the synth changes the properties of wave we are currently generating.
-Whenever the wave changes, we need to compute the sample list, then communicate the sample list to the realtime thread.
+It would be painful to attempt to handle UI events in the realtime thread, so we will run a UI thread (to handle UI events) and, of course, the realtime audio thread.
+The UI thread will not be a realtime thread!
+So, whenever the UI thread handles an event which changes the synth settings, the UI thread needs to compute the sample list, then communicate the sample list to the realtime thread.
 
-Before we think about the realtime world, lets think about how we might solve this if the application were not realtime.
-The most obvious solution is to create an object or structure representing the current set of samples and surround all access to the structure in a mutex.
-This way, both threads can lock the set of samples when they need to read or write to them.
+We can't read and write to the list of samples are the same time (that would be a data race!), so we need some way to control access to the list of samples.
+The most obvious way to solve this is, then surround all access to the list of samples with a `mutex`.
+With the `mutex`, each thread has exclusive access to the set of samples when it needs to read or write to them, so the threads can never interfere with each other.
 
 Unless you have some aversion to locks (you prefer channels or something), this is probably how most of us would write the application.
-Unfortunately, we can't use locks in our realtime thread!
+Unfortunately, we shouldn't use locks in our realtime thread!
 
-When faced with this problem, I went through a couple of of different solutions before reaching the GC thing I'm going to eventually talk about in this post.
+When faced with this problem, I worked through a couple of of different "solutions" before reaching the GC thing I'm going to eventually talk about in this post.
+Let's walk though some of them together.
 
 ## `memcpy` queue
-My first solution was the absolute simplest thing possible.
+My first solution was the simplest thing I could come up with.
 I set up a fixed sized queue between the two threads.
-The queue sent complete lists of samples from one thread to another.
-Here's (roughly) how this worked:
+The queue sent complete lists of samples from the UI thread to the realtime thread.
+Here's (roughly) how this works:
 
-* The UI thread recomputes the list of samples on it's stack
-* The UI thread shipped the samples to the other thread over the queue (copies the samples into the queue's buffer)
-* Every time the realtime callback was called, it checked the queue for new messages.
-* If there were new messages, the samples were copied out of the queue's buffer, into the callback's private buffer.
+* The UI thread notices it needs to handle some UI event
+* The UI thread recomputes the list of samples and stores them on it's stack
+* The UI thread sends the samples to the other thread over the queue (`memcpy` the samples into the queue's buffer)
+* Every time the realtime callback is called, it checks the queue for new messages.
+* If there are new messages, the samples are `memcpy`ed out of the queue's buffer, into the callback's private buffer (which also lives on the stack).
 
+For a crappy slide show demonstrating this process, [click here](/img/sound/memcpy_queue.pdf).
 To get this right, we must be careful with the queue that we use.
-Let's look at our constraints again.
+
 First, the queue must not use locks to send messages back and forth.
-This one we can deal with pretty easily (there are many libraries with lock free queues and ringbuffers).
-But, we must be pretty careful about allocation.
-We cannot let the queue node get deallocated in the realtime thread (we also don't want to leak the node)
-If the queue node is deallocated in the realtime thread, we are making a call to the allocator, but this has been disallowed.
-This is not too difficult to work around either, if we are sure to preallocate everything that the queue will need and use atomics to signal when (and where) to read from.
-Finally, we should note that it is totally fine for the UI thread to block waiting for space in the queue if the realtime thread is not consuming events fast enough.
-This might mean we need to do some event caching on the UI thread side (or maybe pull the latest event off the queue and replace it with a new one or something), but ultimately, it would probably be okay for the UI thread to wait a little while to send the message over the queue.
+This we can deal with pretty easily; there are many good lock free queue and ringbuffer implementations.
 
+Second, we must be pretty careful about allocation.
+Many queues will create a new "queue node" to hold the data placed on the queue.
+When the data is pulled from the queue, the node is deallocated.
+We cannot deallocate any queue nodes in the realtime thread.
+We also probably shouldn't leak the nodes either, so we need to be careful about allocation of queue nodes.
 
-So, we can probably pull something like this off.
-Or can we?
-The `memcpy` we must perform will be a slow operation which will only happen every once and a while.
-`memcpy` is pretty fast, so we can probably get away with this, if we keep the amount of data sent low, but we have to do `memcpy`s with this technique.
+If we are sure to preallocate everything that the queue will need, and we use a good lock free queue implementation, we get around both of these issues.
+
+Finally, note that it I am totally fine letting the UI thread wait for for space in the queue if the realtime thread is not consuming events fast enough.
+I'm assuming that my UI thread is not going to be generating events significantly faster than the realtime thread can consume them.
+If it does, there are ways to work around this on the UI thread which I will not get into now (maybe in a future post).
+
+It looks like we can probably pull this off.
+`memcpy` is pretty fast, so we can probably afford to do a large `memcpy` in the realtime thread every once and a while, but it's not a very good idea to do something slow at effectively random times in the realtime thread.
+It also just feels wrong to make so many copies.
 I'm sure we can do better.
 
 ## Pointer queue
 All problems in computer science can be solved by adding a layer of indirection (or so they say).
-We can get rid of all of the copies if we heap allocate everything and send pointers between threads.
-In this case, the UI thread allocates some space for the samples, then fills the space in with the new list of samples.
-Next, we send this pointer over a bounded, lock free queue.
-When there is a message available for the mealtime thread, all it has to do is swap its `current` pointer with the new pointer that came over the queue.
+Let's try to get rid of all of these copies with pointers!
+We will heap allocate some samples samples on the UI thread, populate them, then pass a pointer to those samples to the realtime thread.
+Again, we need to use a carefully constructed, bounded, lock-free queue.
+
+When there is a message available for the realtime thread, all it has to do is swap its `current` pointer with the new pointer that came over the queue.
+
 But wait!
-What will the realtime thread do with the old list of samples?
-It can't free this memory, and we definitely don't want to leak it, so we need to send it to some other thread to be freed (or reused).
-What if we just send the memory back to the UI thread, and let the UI thread use the memory for the next event it needs to send us.
-This is certainly plausible, but there will be a complications we must work around:
-* We cannot use an unbounded queue to send samples from the mealtime thread -> UI thread.
-    * As far as I know, there are no unbounded queues which do not perform allocation.
-* If the UI thread wants to set up another message before it receives the memory region from the realtime thread, we have two options
-    * Wait for the memory to be delivered before sending the next message
-    * Allocate another region, send it, then deal with the memory region whenever it gets sent back (free it or save it for later)
-* We cannot use a blocking, bounded queue to send the memory back to the UI thread.
-    * If the queue is full, we will have to wait until there is room on the queue.
-        * Remember that the UI thread is not running in realtime, it might not have been run by the scheduler recently, so the last thing we sent might still be on the queue.
-    * We **absolutely cannot** wait!
+What will we do with the previous list of samples?
+We can't free this memory in the realtime thread, and we definitely don't want to leak it, so we need to send it to some other thread to be freed (or reused).
+Let's just send the memory back to the UI thread, then let the UI thread deal with it (perhaps it can even reuse the memory).
+
+This seems plausible, but there are some complications we must work around:
+1. We cannot use an unbounded queue to send samples from the realtime thread to the UI thread.
+    * As far as I know, there are no unbounded queues which do not perform allocation when sending messages.
+2. We cannot use a blocking, bounded queue to send the memory back to the UI thread.
+
+TODO this might actually be doable
+
+To understand the first of these, consider this scenario.
+If the queue is full, we will have to wait until there is room on the queue to push the new pointers.
+Remember that the UI thread is not running in realtime.
+It might not have been run by the scheduler recently, so it may not have had a chance to drain the queue the next time the realtime thread
+
+* We cannot cache the pointers in the realtime thread when the queue is full
+    * The cache of pointers would need to be unbounded (the required size is non-deterministic).
+        * In order to create an unbounded list of something, we need to allocate.
 
 ### Double buffering
 If we get rid of the queue and replace it with two pointers, we swap between the two states with some atomic operations.
