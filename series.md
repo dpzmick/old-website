@@ -12,8 +12,11 @@ I will not explain all of the details needed to implement your own synth from sc
 * [Audio programming 101](/2016/12/11/audio-basics/)
     * Defines digital audio and types of audio applications
     * Discusses some of the nuances of digital audio programming
+
+<!--
 * [Garbage collection for Arc pointers](/2016/11/19/rust-arc-gc-realtime/)
     * A technique which can be used to send messages between threads
+-->
 
 ### Study groups simulation (2014)
 An simulation exploring how large study groups should be.
