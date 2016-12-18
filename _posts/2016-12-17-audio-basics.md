@@ -135,7 +135,7 @@ On linux, we can use the system call `mlockall` to make sure certain pages never
 Next, we want to avoid operations which have a high worst case runtime.
 This can be tricky because some things with bad worst case runtime things have a reasonable [amortized](https://en.wikipedia.org/wiki/Amortized_analysis) runtime.
 The canonical example of this is a [dynamic array](https://en.wikipedia.org/wiki/Dynamic_array).
-A dynamic array can be inserted into very quickly most of the time, but every so often if must reallocate itself and copy all of its data somewhere else.
+A dynamic array can be inserted into very quickly most of the time, but every so often it must reallocate itself and copy all of its data somewhere else.
 For a large array, this expensive copy might cause us to miss our deadline every once and a while.
 Fortunately, for some data structures, we can push these worst case costs around and make the operations realtime safe (see [Incremental resizing](https://en.wikipedia.org/wiki/Hash_table#Dynamic_resizing)).
 
@@ -146,10 +146,10 @@ Standard library allocators break both of our other rules!
 Luckily, we can still perform dynamic memory allocation if we use [specially designed allocators](http://www.gii.upv.es/tlsf/) or [pool allocators](https://github.com/supercollider/supercollider/blob/master/common/SC_AllocPool.h) which do not violate our realtime constraints.
 
 # What do we do?
-In general, there are a few cool tricks we can use to design around these problems, but I'm not going to discuss any of them in this post!
+In general, there are a few cool tricks we can use to design around these problems, but I'm not going to discuss any of them in this post.
 Future posts will discuss possible solutions and many of their tradeoffs, eventually.
 
-If you can't wait, here's some interesting things you can read to learn more:
+If you can't wait, here are some interesting things you can read to learn more:
 * [Overview of Design Patterns for Real-Time Computer Music Systems](http://www.cs.cmu.edu/~rbd/doc/icmc2005workshop/real-time-systems-concepts-design-patterns.pdf)
 * [SuperCollider implementation details](http://supercolliderbook.net/rossbencinach26.pdf) from the [SuperCollider book](http://supercolliderbook.net/)
 * [Supernova for SuperCollider](http://tim.klingt.org/publications/tim_blechmann_supernova.pdf) a Masters thesis discussing some of these issues

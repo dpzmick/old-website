@@ -9,7 +9,7 @@ I'm attempting to create a simple synthesizer from scratch in [Rust](https://www
 These posts are written assuming some basic systems programming knowledge, but no understanding of realtime programming or audio should be needed.
 I will not explain all of the details needed to implement your own synth from scratch, but I will litter each post links to additional information.
 
-* [Audio programming 101](/2016/12/11/audio-basics/)
+* [Audio programming 101](/2016/12/17/audio-basics/)
     * Defines digital audio and types of audio applications
     * Discusses some of the nuances of digital audio programming
 
