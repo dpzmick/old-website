@@ -5,125 +5,16 @@ summary: "Cleaning up after yourself in realtime"
 ---
 
 Recently, I've been working on a synthesizer (the kind that makes sounds) in Rust.
-This post will be the first of many (see my [Blog Series](/series/) page)
+This post is the second post in a series of posts about this project.
+See my [blog series](/series/) page for other posts.
 
-While trying to figure out how to safely send messages between a realtime audio processing thread and other threads (ui thread, disk I/O thread, etc), I stumbled across an excellent talk.
-In the talk, the speaker uses `std::shared_ptr` and a lightweight "garbage collector" to easily send messages between threads.
-The talk is [on youtube](https://www.youtube.com/watch?v=boPEO2auJj4), I highly recommend watching it.
-This post will first explain why such a thing is useful (as does the talk), and how we can do the same thing in Rust.
+If you don't know anything at all about realtime audio programming, you might want to read the first post in this series, [Audio Programming 101](/2016/12/17/audio-basics/), to get a little bit of background.
+If not, here's a tl;dr:
+There's a realtime thread that can never be blocked in any way.
+That means no locks, no I/O, and no allocation performed by the realtime thread.
 
-# Digital audio
-Before we can talk about the Rust stuff, we need to understand a bit about digital audio.
-
-To generate audio, audio software sends some digital audio signals to the audio card.
-Digital audio signals are just lists of floating point (decimal) numbers.
-Think of these numbers as "sound pressure" over time (see [this page](https://docs.cycling74.com/max5/tutorials/msp-tut/mspdigitalaudio.html) for more)
-
-Because sound is continuous, we can't record every possibly value.
-Instead, we take measurements of the sound pressure values at some evenly spaced interval.
-For CD quality audio, we take 44100 samples per second, or, one sample every 23ish microseconds.
-We might sample a sine wave like this (from Wikipedia):
-
-![Samples](https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/Pcm.svg/500px-Pcm.svg.png)
-
-The audio card turns these lists of samples into some "real-world" audio, which is then played through the speakers.
-
-## Types of audio software
-Next let's think about a few different kinds of audio software (this list is by no means complete):
-
-1. Media players (your browser, whatever you listen to music with, a game, etc)
-2. Software instruments (think of a virtual piano)
-3. Audio plugins (an equalizer in a music player, effects like distortion and compression)
-4. Software audio systems
-
-Media players are pretty self explanatory, but the others might need some explanation.
-Next on the list is "Software instruments."
-These are just pieces of software that can be used to generate sounds.
-They are played with external keyboards, or "programmed" with cool user interfaces.
-
-![Drum machine](/img/sound/reason_drums.jpg)
-*Drum machine in some audio software*
-
-Next up are audio plugins.
-These are pieces of software which take audio as input, transform it in some way, then output the transformed audio.
-For example, a graphical equalizer can adjust the volume of different frequency ranges (make the bass louder, make the treble quieter):
-
-![equalizer](/img/sound/itunes_eq.jpg)
-
-Finally, we come to what I'm calling a software audio system.
-Because there is only one sound card on your system, any audio you are playing on your computer must be mixed together, then sent to the audio card.
-On windows, using the default audio system, I can mix audio with this little mixer thing:
-
-![windows mixer](/img/sound/win_mixer.png)
-
-[Some audio systems](http://www.jackaudio.org/) may also be able to send audio between applications, send [MIDI](https://en.wikipedia.org/wiki/MIDI) signals, keep audio applications in sync, and perform many other tasks.
-
-The software audio system provides a library which other applications use to produce audio.
-
-# Audio system details
-Most software audio systems (as far as I know) tend to work the same way.
-There is a realtime thread that generates samples and a bunch of other threads that deal with everything else.
-The audio thread is usually set up by the audio system's library.
-The library calls a user provided callback function to get the samples it needs to deliver to the audio card.
-
-## How fast is realtime?
-In the previous section, I claimed that, at 44.1 kHz (the standard CD sample rate), we need to take one audio sample approximately every 23 microseconds.
-23 microseconds seems pretty quick, but 192 kHz, a sample must be taken about every 5 microseconds (192 kHz is becoming a bit of an industry standard)!
-
-At these speeds, it would not be possible for the audio system to call our callback function to get every individual sample.
-Instead, the audio library system ask us for larger batches of samples.
-If we simplify the real world a bit, we can approximate how often our callback function will be called.
-Here's a table comparing batch size to the time between callback function calls (all times in milliseconds):
-
-| Batch Size | Time between calls @ 44.1 kHz (millis) | Time between calls @ 192 kHz (millis)
-| ---------- | -------------------------------------- | --------------------------------------
-| 64         | 1.45                                   | 0.33
-| 128        | 2.90                                   | 0.67
-| 256        | 5.80                                   | 1.33
-| 512        | 11.61                                  | 2.67
-| 1024       | 23.22                                  | 5.33
-| 2048       | 46.44                                  | 10.67
-| 4096       | 92.88                                  | 21.33
-
-There are many complicated trade offs between sample rate/and batch size, so I don't want to get into them now.
-You can read [this](http://www.penguinproducer.com/Blog/2011/10/balancing-performance-and-reliability-in-jack/) for a bit more information.
-Long story short, use the smallest batch size your computer can handle.
-
-As an audio application developer, we should make sure that our code runs as quickly as possible, even if we have a whole 5 milliseconds to run.
-The time we spend is time other audio applications cannot use.
-So, even if we theoretically have 5 milliseconds to run, using the entire 5 milliseconds can slow everyone else down.
-
-## Time keeps on ticking
-If our callback function fails to generate samples quickly enough (or uses up all of the CPU time), the audio system will produce crackles, pops, and bad sounds.
-We call these buffer underruns (or xruns).
-**Avoiding buffer underruns must be our top priority!**
-
-Everything we do in our callback function must *always* complete quickly and in a very predictable amount of time.
-Unfortunately, this constraint eliminates many things of things we often take for granted, including:
-
-* Synchronization through locking
-* Operations with high worst case runtime
-* Memory allocation with standard allocators
-
-First, we can't use locks or semaphores or conditional variables or any of those kinds of things inside of our realtime callback function.
-If one of our other threads is holding the lock, it might not let go soon enough for us to generate our samples on time!
-If you try to make sure you locks will always be released quickly, the scheduler might step in and ruin your plans (this is called [Priority Inversion](https://en.wikipedia.org/wiki/Priority_inversion)).
-There are some cases in which it *might* be okay to use locks, but, in general, it is a good idea to avoid them.
-
-Second, we want to avoid operations which have a high worst case runtime.
-This can be tricky because some things with bad worst case runtime things have a reasonable [amortized](https://en.wikipedia.org/wiki/Amortized_analysis) runtime.
-The canonical example of this is a [dynamic array](https://en.wikipedia.org/wiki/Dynamic_array).
-A dynamic array can be inserted into very quickly most of the time, but every so often if must reallocate itself and copy all of its data somewhere else.
-For a large array, this expensive copy might cause us to miss our deadline every once and a while.
-Fortunately, for some data structures, we can push these worst case costs around and make the operations realtime safe (see [Incremental resizing](https://en.wikipedia.org/wiki/Hash_table#Dynamic_resizing)).
-
-Finally, memory allocation with standard library allocators can cause problems.
-Memory allocators are usually thread safe, which usually means that the are locking something.
-Additionally, allocation algorithms rarely make any time guarantees; the algorithms they use can have very poor worst case runtimes.
-Standard library allocators break both of our other rules!
-Luckily, we can still perform dynamic memory allocation if we use [specially designed allocators](http://www.gii.upv.es/tlsf/) or [some pool allocators](https://github.com/supercollider/supercollider/blob/master/common/SC_AllocPool.h) which do not violate our realtime constraints.
-
-I've glossed over many, many details in this section, but, the [cppcon video](https://www.youtube.com/watch?v=boPEO2auJj4), and [this excellent post](http://www.rossbencina.com/code/real-time-audio-programming-101-time-waits-for-nothing) both go into much more detail, if you are interested (and why wouldn't you be??).
+This means that sending messages from non-realtime threads to the realtime thread is tricky.
+This post is a discussion of one of the methods presented in [this cppcon talk](https://www.youtube.com/watch?v=boPEO2auJj4), implemented in Rust.
 
 # Messaging between threads
 Suppose we are developing a very simple synthesizer which produces sounds when keys are pressed on a MIDI keyboard.
@@ -131,10 +22,9 @@ The audio library we are using delivers all keyboard key presses to the realtime
 The callback function uses a precomputed list of samples to generate sounds when it is told to.
 To modify the properties of the sounds that are produced, the user edits the synthesizer settings with a user interface.
 
-The fun starts when we think about how to update the precomputed list of samples when the user changes some properties of sound we are currently generating.
-It would be painful (and incorrect) to attempt to handle UI events in the realtime thread, so we will run a UI thread (to handle UI events) and, of course, the realtime audio thread.
-The UI thread will not be a realtime thread!
-So, whenever the UI thread handles an event which changes the synth settings, the UI thread needs to compute the sample list, then communicate the sample list to the realtime thread.
+It would be painful (and incorrect) to attempt to handle UI events in the realtime thread, so we will run a UI thread (to handle UI events) and, of course, a realtime audio thread.
+Whenever the UI thread handles an event which changes the synth settings, the UI thread needs to compute the sample list, then communicate the sample list to the realtime thread.
+Keep in mind, the UI thread will not be a realtime thread!
 
 We can't read and write to the list of samples are the same time (that would be a data race!), so we need some way to control access to the list of samples.
 The most obvious way to solve this is, then surround all access to the list of samples with a `mutex`.
@@ -143,19 +33,7 @@ With the `mutex`, each thread has exclusive access to the set of samples when it
 Unless you have some aversion to locks (you prefer channels or something), this is probably how most of us would write the application.
 Unfortunately, we shouldn't use locks in our realtime thread!
 
-There are many, many solutions to this problem.
-I will discuss some others in future posts.
-For now, we will just look at one possible solution and discuss some of the tradeoffs we must make.
-In a later post, I will compare a different options (with benchmarks), but for this post, we will just write a small example and *think* really hard about it (treat it more like a though experiment).
-
-And, as promised, here is a list of really interesting things you can read to learn more:
-* [Overview of Design Patterns for Real-Time Computer Music Systems](http://www.cs.cmu.edu/~rbd/doc/icmc2005workshop/real-time-systems-concepts-design-patterns.pdf)
-* [SuperCollider implementation details](http://supercolliderbook.net/rossbencinach26.pdf) from the [SuperCollider book](http://supercolliderbook.net/)
-* [Supernova for SuperCollider](http://tim.klingt.org/publications/tim_blechmann_supernova.pdf) a Masters thesis discussing some of these issues
-
-
 # Reference counted garbage collector
-Finally, we can talk about the (intended) subject of this post.
 My objective is to send a message containing some samples to the realtime thread.
 I think a lock free queue is a pretty good way to send messages between threads, and I like to think [CSP](https://en.wikipedia.org/wiki/Communicating_sequential_processes) style.
 I would like to let this message live somewhere on the heap, so that I do not need to copy it multiple times.
@@ -171,6 +49,8 @@ The specific lock-free queue that we chose to use needs to have a few properties
 For the sake of these examples, let's assume that the built in Rust [mpsc channel](https://doc.rust-lang.org/std/sync/mpsc/index.html) is an appropriate lock free queue.
 It will be pretty easy to swap this with something different later, and, if we use the standard library, all of the examples will easily run in the rust playground.
 We are also going to fake a bunch of the details of the audio library.
+
+TODO big picture with slideshow here!
 
 ## Fake audio library
 Rust playground link: [https://is.gd/Qe1YjZ](https://is.gd/Qe1YjZ)
@@ -647,7 +527,7 @@ impl<T: Send + 'static> GC<T> {
 
 We written a bunch of new code, better make sure it compiles:
 
-```
+```rust
 $ rustc test.rs
 error[E0277]: the trait bound `T: std::marker::Sync` is not satisfied
   --> test.rs:64:25
