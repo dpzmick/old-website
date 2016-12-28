@@ -6,51 +6,66 @@ summary: "Cleaning up after yourself in realtime"
 
 Recently, I've been working on a synthesizer (the kind that makes sounds) in Rust.
 This post is the second post in a series of posts about this project.
-See my [blog series](/series/) page for other posts.
+See my [blog series](/series/) page for links to other posts.
 
 If you don't know anything at all about realtime audio programming, you might want to read the first post in this series, [Audio Programming 101](/2016/12/17/audio-basics/), to get a little bit of background.
-If not, here's a tl;dr:
-There's a realtime thread that can never be blocked in any way.
-That means no locks, no I/O, and no allocation performed by the realtime thread.
-
-This means that sending messages from non-realtime threads to the realtime thread is tricky.
-This post is a discussion of one of the methods presented in [this cppcon talk](https://www.youtube.com/watch?v=boPEO2auJj4), implemented in Rust.
+Basically, there's a realtime thread that can never be blocked in any way.
+The realtime thread is responsible for generating all of the audio which an application will produce.
+If the realtime thread ever fails to generate the audio it needs to generate, bad things happen.
+That means locks, I/O, and allocation are all off limits in the realtime thread.
+Sending messages from non-realtime threads to the realtime thread is trickier than it might be in a "normal" application because we can't do these things.
+There are many, many techniques which can be used to work around this trickiness.
+This post is a discussion of one such method (presented in [this cppcon talk](https://www.youtube.com/watch?v=boPEO2auJj4)) implemented in [Rust](https://www.rust-lang.org/en-US/).
 
 # Messaging between threads
-Suppose we are developing a very simple synthesizer which produces sounds when keys are pressed on a MIDI keyboard.
-The audio library we are using delivers all keyboard key presses to the realtime audio callback function at the appropriate times.
-The callback function uses a precomputed list of samples to generate sounds when it is told to.
+Suppose we are developing a synthesizer which produces sounds when keys are pressed on a [MIDI keyboard](https://en.wikipedia.org/wiki/MIDI_controller#Keyboards).
+The audio library we are using calls a function we provide once ever 6 or so milliseconds to request a list of samples from us.
+The library calls our function with 2 arguments: 1) How many samples it wants 2) what key presses we need to handle.
+The callback function uses a precomputed list of samples to generate sounds every time it is called.
 To modify the properties of the sounds that are produced, the user edits the synthesizer settings with a user interface.
 
-It would be painful (and incorrect) to attempt to handle UI events in the realtime thread, so we will run a UI thread (to handle UI events) and, of course, a realtime audio thread.
-Whenever the UI thread handles an event which changes the synth settings, the UI thread needs to compute the sample list, then communicate the sample list to the realtime thread.
-Keep in mind, the UI thread will not be a realtime thread!
+It would be painful (and incorrect) to attempt to handle UI events in the realtime thread, so we will run a UI thread to handle the UI events.
+Whenever the UI thread gets an event to handle, it needs to compute a new sample list, then send the list to the realtime thread.
 
-We can't read and write to the list of samples are the same time (that would be a data race!), so we need some way to control access to the list of samples.
-The most obvious way to solve this is, then surround all access to the list of samples with a `mutex`.
-With the `mutex`, each thread has exclusive access to the set of samples when it needs to read or write to them, so the threads can never interfere with each other.
+If we were allowed to lock, we could just stick a `mutex` around a global list of samples and call it a day, but we can't do that.
 
-Unless you have some aversion to locks (you prefer channels or something), this is probably how most of us would write the application.
-Unfortunately, we shouldn't use locks in our realtime thread!
+Instead of locking, lets use a queue to send some sort of message between threads.
+The queue that we choose needs to have a few properties:
 
-# Reference counted garbage collector
-My objective is to send a message containing some samples to the realtime thread.
-I think a lock free queue is a pretty good way to send messages between threads, and I like to think [CSP](https://en.wikipedia.org/wiki/Communicating_sequential_processes) style.
-I would like to let this message live somewhere on the heap, so that I do not need to copy it multiple times.
-If the message lives on the heap, we must ensure two things:
+* Must be a [lock free queue](https://pdfs.semanticscholar.org/a909/1ef790788c5d252cad94dd6862adf457e073.pdf)
+* Must be able to preallocate all of its nodes (cant't allocate and free a node object on a push or pull)
 
-1. It must be freed at some point
-2. Multiple threads do not/can not write to the memory at the same time
+I would like place this message on the heap so it doesn't need to be copied each time a new thread takes ownership of it.
+If the message lives on the heap, we must ensure that the message is allocated and freed outside of the realtime thread.
+These messages can be kept simple.
+All we need is a tag (what kind of message this is), and some block of memory to contain samples.
 
-The specific lock-free queue that we chose to use needs to have a few properties:
-* Must be truly lock free
-* Must be able to preallocate all of its nodes (cant't allocate and free a node object on a push and pull)
+## Reference counted garbage collection
+Because these messages are going to live on the heap, they will need to be allocated and freed.
+Since the messages are created by the UI thread, it is fine for us to allocate space for the message, populate it, then ship a pointer over to the realtime thread.
+When the realtime thread takes ownership of the message, it will need to hold onto the data for some undefined period of time.
+When the realtime thread is done with the message, it cannot free it, because we can't call memory allocation functions in the realtime thread.
 
+To solve this, we will run one more thread to clean up messages which are no longer being used by the realtime thread.
+Whenever the UI thread creates a message, it will wrap it in a reference-counted pointer.
+It then will let the collector thread know it should start tracking the reference-counted pointer.
+The message is then sent over the queue from the UI thread to the realtime thread.
+When the realtime thread receives the message, it will keep a reference to the message until it is done with it.
+
+The collector thread stores a list of pointers which it manages, so every pointer which is managed by the collector will always have at least one reference.
+Every 100 milliseconds or so, the collector will scan its pointer list, removing anything which has a reference count of 1.
+When the elements are removed from the list, their memory is freed.
+
+[Here](/img/sound/gc_queue.pdf) is a slideshow/animation demonstrating this process.
+
+## Tradeoffs
+This approach is useful when the message producer blah blah blah but not when it blah blee bloo.
+
+# Let's get building
+Now lets make one in Rust.
 For the sake of these examples, let's assume that the built in Rust [mpsc channel](https://doc.rust-lang.org/std/sync/mpsc/index.html) is an appropriate lock free queue.
 It will be pretty easy to swap this with something different later, and, if we use the standard library, all of the examples will easily run in the rust playground.
 We are also going to fake a bunch of the details of the audio library.
-
-TODO big picture with slideshow here!
 
 ## Fake audio library
 Rust playground link: [https://is.gd/Qe1YjZ](https://is.gd/Qe1YjZ)
@@ -133,6 +148,7 @@ Output (one of many possible):
 [ui] thread shutting down
 ```
 
+
 ## Sending Arcs between threads
 Now that we have an "audio library," lets try to make some messages and pass them between threads.
 I'm going to jump right into the "garbage collector" solution here.
@@ -142,11 +158,16 @@ The `RealtimeThread` struct will need to hold on to a list of samples which it w
 We want these samples to be heap allocated and reference counted, so we wrap them in an [`Arc`](https://doc.rust-lang.org/std/sync/struct.Arc.html).
 Finally, we want to leave the samples uninitialized until the UI thread sends us some, so we wrap the `Arc<Samples>` in an [`Option`](https://doc.rust-lang.org/std/option/enum.Option.html).
 
-```rust
-struct RealtimeThread {
-    current_samples: Option<Arc<Samples>>,
-}
-```
+  ```rust
+  struct RealtimeThread {
+      current_samples: Option<Arc<Samples>>,
+  }
+  ```
+
+  ```python
+  def test():
+
+  ```
 
 Now that the realtime thread has a list of samples, we can fill in a bit of the body of the realtime callback function:
 
