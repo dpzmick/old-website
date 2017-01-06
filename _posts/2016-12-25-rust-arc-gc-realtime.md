@@ -59,7 +59,16 @@ When the elements are removed from the list, their memory is freed.
 [Here](/img/sound/gc_queue.pdf) is a slideshow/animation demonstrating this process.
 
 ## Tradeoffs
-This approach is useful when the message producer blah blah blah but not when it blah blee bloo.
+Let's consider some of the theoretical pros and cons of this approach.
+Note that we should take anything I have to say with a grain of salt; I haven't benchmarked anything (yet), so I really have no evidence to support these claims.
+
+First, lets talk about a cases where we would not want to use this approach:
+If the realtime thread always consumes new messages in a predictable amount of time, it can return the memory used for the message to the UI thread.
+In this case, we may be able to establish a fixed size buffer to hold onto "in flight" UI messages
+
+* The rate messages are created is not significantly greater than the rate they are freed.
+* The messages are returned by the realtime thread somewhat arbitrarily.
+* The realtime thread never needs to pass a message to the UI thread
 
 # Let's get building
 Now lets make one in Rust.
