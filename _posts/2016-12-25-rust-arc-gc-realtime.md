@@ -8,76 +8,89 @@ Recently, I've been working on a synthesizer (the kind that makes sounds) in Rus
 This post is the second post in a series of posts about this project.
 See my [blog series](/series/) page for links to other posts.
 
-If you don't know anything at all about realtime audio programming, you might want to read the first post in this series, [Audio Programming 101](/2016/12/17/audio-basics/), to get a little bit of background.
-Basically, there's a realtime thread that can never be blocked in any way.
-The realtime thread is responsible for generating all of the audio which an application will produce.
+If you don't know anything at all about realtime audio programming, you might want to read the first post in this series, [Audio Programming 101](/2016/12/17/audio-basics/), or watch [this talk](https://www.youtube.com/watch?v=SJXGSJ6Zoro) from the Audio Developers Conference, to get a little bit of background.
+
+In short, there's a realtime thread that can never be blocked in any way.
+The realtime thread is responsible for sending all of the audio which an application will produce to an audio system, at exactly the right moments.
 If the realtime thread ever fails to generate the audio it needs to generate, bad things happen.
-That means locks, I/O, and allocation are all off limits in the realtime thread.
+That means locks, I/O, allocation are all off limits in the realtime thread.
+
 Sending messages from non-realtime threads to the realtime thread is trickier than it might be in a "normal" application because we can't do these things.
 There are many, many techniques which can be used to work around this trickiness.
 This post is a discussion of one such method (presented in [this cppcon talk](https://www.youtube.com/watch?v=boPEO2auJj4)) implemented in [Rust](https://www.rust-lang.org/en-US/).
 
 # Messaging between threads
 Suppose we are developing a synthesizer which produces sounds when keys are pressed on a [MIDI keyboard](https://en.wikipedia.org/wiki/MIDI_controller#Keyboards).
-The audio library we are using calls a function we provide once ever 6 or so milliseconds to request a list of samples from us.
+The audio library calls a function we provide once ever 6 or so milliseconds to request a list of samples from us.
 The library calls our function with 2 arguments: 1) How many samples it wants 2) what key presses we need to handle.
 The callback function uses a precomputed list of samples to generate sounds every time it is called.
-To modify the properties of the sounds that are produced, the user edits the synthesizer settings with a user interface.
+To modify the properties of the sounds that are produced, the user edits settings with a user interface.
 
 It would be painful (and incorrect) to attempt to handle UI events in the realtime thread, so we will run a UI thread to handle the UI events.
 Whenever the UI thread gets an event to handle, it needs to compute a new sample list, then send the list to the realtime thread.
 
-If we were allowed to lock, we could just stick a `mutex` around a global list of samples and call it a day, but we can't do that.
-
-Instead of locking, lets use a queue to send some sort of message between threads.
+Since we can't lock, let's use a queue to send some sort of message between threads.
 The queue that we choose needs to have a few properties:
 
 * Must be a [lock free queue](https://pdfs.semanticscholar.org/a909/1ef790788c5d252cad94dd6862adf457e073.pdf)
-* Must be able to preallocate all of its nodes (cant't allocate and free a node object on a push or pull)
+* Must be able to preallocate all of its nodes (cant't allocate or free memory for a node on a push or pull)
 
-I would like place this message on the heap so it doesn't need to be copied each time a new thread takes ownership of it.
-If the message lives on the heap, we must ensure that the message is allocated and freed outside of the realtime thread.
-These messages can be kept simple.
-All we need is a tag (what kind of message this is), and some block of memory to contain samples.
+I want to place messages on the heap so that they do not need to be copied as we move them around.
+If messages lives on the heap, we must ensure they are allocated and freed outside of the realtime thread (we can't call allocation functions on the realtime thread).
 
 ## Reference counted garbage collection
-Because these messages are going to live on the heap, they will need to be allocated and freed.
-Since the messages are created by the UI thread, it is fine for us to allocate space for the message, populate it, then ship a pointer over to the realtime thread.
+It is totally fine to allocate on the UI thread, so when the UI thread handles an event it will compute a new list of samples and stick them into a freshly allocated block of memory.
+Then we will ship this message over to the realtime thread.
+
 When the realtime thread takes ownership of the message, it will need to hold onto the data for some undefined period of time.
-When the realtime thread is done with the message, it cannot free it, because we can't call memory allocation functions in the realtime thread.
+But, when the realtime thread is done with the message, it cannot free it.
 
-To solve this, we will run one more thread to clean up messages which are no longer being used by the realtime thread.
-Whenever the UI thread creates a message, it will wrap it in a reference-counted pointer.
-It then will let the collector thread know it should start tracking the reference-counted pointer.
-The message is then sent over the queue from the UI thread to the realtime thread.
-When the realtime thread receives the message, it will keep a reference to the message until it is done with it.
+To solve this, let's run one more thread to clean up messages which are no longer being used by the realtime thread.
 
-The collector thread stores a list of pointers which it manages, so every pointer which is managed by the collector will always have at least one reference.
-Every 100 milliseconds or so, the collector will scan its pointer list, removing anything which has a reference count of 1.
-When the elements are removed from the list, their memory is freed.
+Whenever the UI thread allocates space for a message using standard allocators, it will wrap the message in a [reference-counted pointer](https://doc.rust-lang.org/std/sync/struct.Arc.html).
+It then will let the collector thread know it should start keeping an eye on the reference-counted pointer.
+The collector will store the pointer in a list.
+When the reference count falls to 1, the collector is the only thread with a reference, and it can safely free the memory.
+The pointer is sent to the realtime thread, then, when the realtime thread drops the message, the reference count will drop.
+Sometime later, the collector thread will observe the decreased reference count and free the message.
 
 [Here](/img/sound/gc_queue.pdf) is a slideshow/animation demonstrating this process.
 
 ## Tradeoffs
 Let's consider some of the theoretical pros and cons of this approach.
-Note that we should take anything I have to say with a grain of salt; I haven't benchmarked anything (yet), so I really have no evidence to support these claims.
+Note that we should take anything I have to say with a grain of salt; I haven't benchmarked anything, so I really have no evidence to support anything I'm claiming.
 
-First, lets talk about a cases where we would not want to use this approach:
-If the realtime thread always consumes new messages in a predictable amount of time, it can return the memory used for the message to the UI thread.
-In this case, we may be able to establish a fixed size buffer to hold onto "in flight" UI messages
+First, let's talk about when we would not want to use this approach.
 
-* The rate messages are created is not significantly greater than the rate they are freed.
-* The messages are returned by the realtime thread somewhat arbitrarily.
-* The realtime thread never needs to pass a message to the UI thread
+If the realtime thread always consumes new messages in a predictable amount of time, we can preallocate a fixed size buffer to hold onto "in flight" UI messages.
+When the UI needs to send a message it can grab one of the preallocated messages and use it.
+Some predictable amount of time later, the message can be returned to the pool.
 
-# Let's get building
-Now lets make one in Rust.
+This is also a bad idea if the UI thread generates messages significantly faster than the realtime thread consumes them.
+It might be fine for the realtime thread to lag behind the UI thread (if it eventually catches up), but the GC pointer list is going to get quite large.
+If we do our GC scan frequently, we will be using a lot of cpu time scanning this list.
+If we slow the collector down, the list is going to keep growing, and so will our memory usage.
+In other words, its a sticky situation.
+A modern computer can probably handle this load, but we should avoid generating more load than necessary to give other audio applications as much time to do their work as possible.
+
+Finally, if the realtime thread needs to send a message to the UI thread, it can't just allocate memory and toss it at the GC thread for cleanup later.
+We could still use the GC+queue method discussed here to send messages to the realtime thread, but we probably only have time to build one good messaging system (we want to make audio, not send messages back and forth!)
+
+If none of the above are true, a simple GC thread with some reference counted pointers might be a nice way to avoid adding lots of complexity to a small system.
+It also saves us from the need for a custom allocation mechanism, lets us send messages of various and dynamic sizes, and frees us from the burden of strict capacity constraints.
+So, if we don't need something more clever, maybe this is a good thing to try out.
+
+The cost of reference counting is okay.
+
+Regardless of the actual efficacy of this approach, it will be interesting to try to build one in Rust, so let's get started.
+
+# Let's make one
 For the sake of these examples, let's assume that the built in Rust [mpsc channel](https://doc.rust-lang.org/std/sync/mpsc/index.html) is an appropriate lock free queue.
 It will be pretty easy to swap this with something different later, and, if we use the standard library, all of the examples will easily run in the rust playground.
 We are also going to fake a bunch of the details of the audio library.
 
 ## Fake audio library
-Rust playground link: [https://is.gd/Qe1YjZ](https://is.gd/Qe1YjZ)
+[Rust Playground Link](https://play.rust-lang.org/?gist=27d1b7a693ffe01ac899b991317b170f&version=stable&backtrace=0).
 
 We don't need to walk through this code, it just makes some threads and calls some empty functions.
 The important bits are the `RealtimeThread::realtime_callback` function and the `UIThread::run` functions.
@@ -159,9 +172,7 @@ Output (one of many possible):
 
 
 ## Sending Arcs between threads
-Now that we have an "audio library," lets try to make some messages and pass them between threads.
-I'm going to jump right into the "garbage collector" solution here.
-Other solutions will be discussed elsewhere.
+Now that we have an "audio library," let's try to make some messages and pass them between threads.
 
 The `RealtimeThread` struct will need to hold on to a list of samples which it will use to populate the `output` samples every time the callback is called.
 We want these samples to be heap allocated and reference counted, so we wrap them in an [`Arc`](https://doc.rust-lang.org/std/sync/struct.Arc.html).
@@ -171,11 +182,6 @@ Finally, we want to leave the samples uninitialized until the UI thread sends us
   struct RealtimeThread {
       current_samples: Option<Arc<Samples>>,
   }
-  ```
-
-  ```python
-  def test():
-
   ```
 
 Now that the realtime thread has a list of samples, we can fill in a bit of the body of the realtime callback function:
@@ -214,12 +220,6 @@ fn compute_samples(&self, volume: f32) -> Samples {
 }
 ```
 
-Notice that it returns the list of samples by value.
-Have no fear, [return value optimization](https://en.wikipedia.org/wiki/Return_value_optimization) is here!
-I don't actually know if Rust will perform this optimization (TODO VERIFY THIS), but it doesn't really matter for this example.
-If we do end up copying the samples, it doesn't matter that much.
-Even if the copy is slow, we will be performing the copy on the UI thread, where we can afford to be a bit slower.
-
 The UI thread will generate some fake events, and compute samples for these events:
 
 ```rust
@@ -238,9 +238,10 @@ fn run(&mut self) {
 ```
 
 Now that we've done all of that, we need to send the samples between threads.
+
 We need a message type.
-Messages from the UI thread will be either a new list of samples or a request to shutdown.
-Since we are storing the samples as an `Arc`, we will send them to the realtime thread as an `Arc`.
+Messages from the UI thread will be either a new list of samples or a shutdown notification.
+As discussed previously, we will create the `Arc` on the UI thread, then send it to the realtime thread.
 
 ```rust
 enum Message {
@@ -264,7 +265,12 @@ From [the docs](https://doc.rust-lang.org/std/sync/mpsc/fn.sync_channel.html):
 
 > Note that a buffer size of 0 is valid, in which case this [channel] becomes "rendezvous channel" where each send will not return until a recv is paired with it.
 
-To create this queue, first we need to add some code to `main` to create the queues:
+This "channel" will have two ends; one which can send messages and one which can receive messages.
+Lets create both of them in the `main` method.
+The send side will be called `tx` (for transmit) and the receive side is called `rx`.
+Whenever a message is placed on `tx` it will become available on `rx`.
+We also let our threads take ownership of the queues.
+We give `rx` to the `RealtimeThread`, because it will receive messages, and `tx` to the `UIThread`, because it will be sending them.
 
 ```rust
 fn main() {
@@ -293,7 +299,7 @@ struct UIThread {
 ```
 
 Now, let's get our threads sending messages, starting with the UI thread.
-In both cases, if the send fails, something has gone horribly wrong, so its fine to `unwrap` the result of these sends.
+If any sends fails, something has gone horribly wrong, so its fine to `unwrap` the result of these sends.
 
 ```rust
 /// All of the UI thread code
@@ -328,10 +334,11 @@ fn realtime_callback(&mut self, output_samples: &mut Samples) -> CallbackStatus 
                 self.current_samples = Some(samples)
             },
 
+            // If we got a shutdown message, shutdown the realtime thread
             Message::Shutdown => return CallbackStatus::Shutdown
         },
 
-        // if we failed to receive anything, just keep sending samples
+        // if we didn't receive anything, just keep sending samples
         Err(_) => ()
     }
 
@@ -346,11 +353,10 @@ fn realtime_callback(&mut self, output_samples: &mut Samples) -> CallbackStatus 
 ```
 
 I've used a `println!` here only for the sake of demonstration.
-You shouldn't ever do this in real realtime code.
-Print statements are not usually implemented in a realtime safe manner.
+You shouldn't ever do this in real realtime code (because print statements usually allocate!)
 
-This code is to long to past a Rust playground link to, so [here](/code/sound/arc1.rs) is the full source.
-You can copy/paste the code in to run it.
+[Here is a link](https://play.rust-lang.org/?gist=6e37aa0a7f8d06f8b31b9822c8bbb79c&version=stable&backtrace=0) to this code in the rust playground.
+It might timeout if you try running it. If you see any messages about timeout, don't worry, just try running the code again.
 
 Here is an example output:
 ```
@@ -370,9 +376,8 @@ Here is an example output:
 [ui] thread shutting down
 ```
 
-# Collecting the garbage
-The last example seems to be working, but it has one fatal flaw.
-Let's take a look at what the realtime callback does when it receives a new set of samples.
+## Problems?
+The last example *seems* to do the right thing, let's take a look at what the realtime callback does when it receives a new set of samples.
 
 ```rust
 // ...
@@ -401,11 +406,13 @@ Let's refer to the docs for `drop`.
 
 > This will decrement the strong reference count. If the strong reference count becomes zero and the only other references are Weak<T> ones, drops the inner value.
 
-We aren't currently holding on to any other references to this block of memory, so this means that the samples will be deallocated.
-This is a problem! We can't let our realtime callback perform memory allocation.
-One (of many) ways to fix this would be to deallocate the list of samples from another thread once no one has a reference to them anymore.
-Luckily, an `Arc` is reference counted, so we know that we can access this count.
-Essentially, we want to create a lightweight garbage collector that will clean up our reference counted, heap allocated samples when we are done with them.
+In this case, the inner value is some heap allocated memory, so calling drop will deallocate that memory (since no one else is holding any references).
+This is a problem!
+We can't let our realtime callback perform memory allocation.
+
+# Build the GC
+
+We now need to build the GC thread.
 Sneak peak, once the GC is implemented, all we have to change is `UIThread::run`, in a very small way:
 
 ```rust
@@ -413,9 +420,9 @@ Sneak peak, once the GC is implemented, all we have to change is `UIThread::run`
     fn run(&mut self) {
         let mut gc = GC::new(); // + NEW LINE
 
-        // create 10 "ui events"
+        // create 5 "ui events"
         for i in 0..5 {
-            let volume = i as f32 / 10.0;
+            let volume = i as f32 / 5.0;
             let samples = Arc::new(self.compute_samples(volume));
             gc.track(samples.clone()); // + NEW LINE
 
@@ -429,7 +436,8 @@ Sneak peak, once the GC is implemented, all we have to change is `UIThread::run`
     }
 ```
 
-From the last example, we can roughly define the interface we want our garbage collector to have:
+With that in mind, lets sketch out the interface for the Garbage Collector.
+
 ```rust
 /// A garbage collector for Arc<T> pointers
 struct GC<T> {
@@ -452,17 +460,12 @@ impl<T> GC<T> {
 ```
 
 Lets start filling in some of these methods.
-First lets think about the `track` method.
-Let's just hold onto a vector of all of the pointers we are currently tracking.
-This serves two purposes:
-1. Gives us a convinient way to iterate over the data we are tracking.
-2. Make sure there is always at least 1 reference to the data we are tracking (our own)
+First think about the `track` method.
+All this method needs to do is move it's argument into some list (or vector) of pointers.
+We will keep this vector in the GC thread struct so that each of the references will live until the GC thread is shut down, or until the GC thread releases them.
 
-We care about the second because we never want these `Arc<T>`s to be dropped outside of the collector.
-
-Lets go ahead and give this a try:
 ```rust
-struct GC<T: Send + 'static> {
+struct GC<T> {
     pool: Vec<Arc<T>>,
 }
 
@@ -508,11 +511,8 @@ pool.retain(|e: Arc<_>| {
 })
 ```
 
-
-
-
-Looks okay to me, lets move on to `new`.
-`new` needs to create a new thread which runs the `pool.retain` thing we just wrote.
+Let's move on to `new`.
+The `new` method needs to start new thread which will run the `pool.retain` thing we just wrote every once and a while.
 Additionally, if we are going to start a new thread, we will also need to hold on to a handle to join that thread when we shut down.
 
 ```rust
@@ -522,25 +522,33 @@ struct GC<T> {
     thread: thread::JoinHandle<()>,
 }
 
-impl<T: Send + 'static> GC<T> {
+impl<T> GC<T> {
+    // private. cleans up any dead pointers in a pool
+    fn cleanup(pool: &mut Vec<Arc<T>>) {
+        pool.retain(|e: &Arc<_>| {
+            if Arc::strong_count(&e) > 1 {
+                return true
+            } else {
+                return false
+            }
+        });
+    }
+
     pub fn new() -> Self {
         let pool = Vec::new();
 
+        // create a closure which will become a new thread
         let gc = || {
             loop {
-                pool.retain(|e: &Arc<_>| {
-                    if Arc::strong_count(&e) > 1 {
-                        return true
-                    } else {
-                        return false
-                    }
-                });
+                GC::cleanup(&mut pool);
 
+                // wait for 100 milliseconds, then scan again
                 let sleep = std::time::Duration::from_millis(100);
                 thread::sleep(sleep);
             }
         };
 
+        // spawns a new thread and returns a handle to the thread
         let gc_thread = thread::spawn(gc);
 
         GC {
@@ -553,228 +561,204 @@ impl<T: Send + 'static> GC<T> {
         self.pool.push(t);
     }
 }
+
+fn main() {
+    let (tx, rx) = mpsc::sync_channel(0);
+    let rt = RealtimeThread::new(rx);
+    let ui = UIThread::new(tx);
+    run_threads(rt, ui);
+}
 ```
 
-We written a bunch of new code, better make sure it compiles:
+We written a bunch of new code, better make sure it compiles ([rust playground](https://play.rust-lang.org/?gist=7267b42a9c967e5449d0e2dde2f07564&version=stable&backtrace=0)):
 
 ```rust
-$ rustc test.rs
+error[E0277]: the trait bound `T: std::marker::Send` is not satisfied
+   --> <anon>:154:25
+    |
+154 |         let gc_thread = thread::spawn(gc);
+    |                         ^^^^^^^^^^^^^ the trait `std::marker::Send` is not implemented for `T`
+    |
+    = help: consider adding a `where T: std::marker::Send` bound
+    = note: required because of the requirements on the impl of `std::marker::Send` for `std::sync::Arc<T>`
+    = note: required because of the requirements on the impl of `std::marker::Send` for `std::ptr::Unique<std::sync::Arc<T>>`
+    = note: required because it appears within the type `alloc::raw_vec::RawVec<std::sync::Arc<T>>`
+    = note: required because it appears within the type `std::vec::Vec<std::sync::Arc<T>>`
+    = note: required because of the requirements on the impl of `std::marker::Send` for `&mut std::vec::Vec<std::sync::Arc<T>>`
+    = note: required because it appears within the type `[closure@<anon>:143:18: 151:10 pool:&mut std::vec::Vec<std::sync::Arc<T>>]`
+    = note: required by `std::thread::spawn`
+
 error[E0277]: the trait bound `T: std::marker::Sync` is not satisfied
-  --> test.rs:64:25
-   |
-64 |         let gc_thread = thread::spawn(gc);
-   |                         ^^^^^^^^^^^^^ trait `T: std::marker::Sync` not satisfied
-   |
-   = help: consider adding a `where T: std::marker::Sync` bound
-   = note: required because of the requirements on the impl of `std::marker::Send` for `std::sync::Arc<T>`
-   = note: required because of the requirements on the impl of `std::marker::Send` for `std::ptr::Unique<std::sync::Arc<T>>`
-   = note: required because it appears within the type `alloc::raw_vec::RawVec<std::sync::Arc<T>>`
-   = note: required because it appears within the type `std::vec::Vec<std::sync::Arc<T>>`
-   = note: required because of the requirements on the impl of `std::marker::Send` for `&mut std::vec::Vec<std::sync::Arc<T>>`
-   = note: required because it appears within the type `[closure@test.rs:49:18: 62:10 pool:&mut std::vec::Vec<std::sync::Arc<T>>]`
-   = note: required by `std::thread::spawn`
+   --> <anon>:154:25
+    |
+154 |         let gc_thread = thread::spawn(gc);
+    |                         ^^^^^^^^^^^^^ the trait `std::marker::Sync` is not implemented for `T`
+    |
+    = help: consider adding a `where T: std::marker::Sync` bound
+    = note: required because of the requirements on the impl of `std::marker::Send` for `std::sync::Arc<T>`
+    = note: required because of the requirements on the impl of `std::marker::Send` for `std::ptr::Unique<std::sync::Arc<T>>`
+    = note: required because it appears within the type `alloc::raw_vec::RawVec<std::sync::Arc<T>>`
+    = note: required because it appears within the type `std::vec::Vec<std::sync::Arc<T>>`
+    = note: required because of the requirements on the impl of `std::marker::Send` for `&mut std::vec::Vec<std::sync::Arc<T>>`
+    = note: required because it appears within the type `[closure@<anon>:143:18: 151:10 pool:&mut std::vec::Vec<std::sync::Arc<T>>]`
+    = note: required by `std::thread::spawn`
+
+error: aborting due to 2 previous errors
+```
+
+Oops, this isn't good.
+This error makes it feel sort of like Rust hates us, but the compiler is actually doing us a massive favor.
+In Rust, there are a few thread safety "marker traits" called `Send` and `Sync`.
+The compiler is telling us that our generic type `T` doesn't implement either of them.
+
+Put very loosely, if something implements `Send`, it is safe to send it between threads.
+`Sync` is considerably more subtle and quite difficult to wrap your head around, but we can sort of say that, if something implements `Sync`, we can *access* the same instance of it from multiple threads.
+Again, this entire concept is quite subtle, but very powerful.
+For more info, you can read [this blog post](http://huonw.github.io/blog/2015/02/some-notes-on-send-and-sync/), but you shouldn't need any more than what I've given to get through the rest of my post.
+
+So anyway, Rust is telling us that we have a thread safety problem, but we haven't guaranteed that we can safely copy and access values of our type `T` between the garbage collector thread and any other threads.
+
+I know that `T` must be `Send`, because it has to be sent between threads, so let's go ahead and add that restriction:
+
+```rust
+/// A garbage collector for Arc<T> pointers
+struct GC<T: Send> {
+    pool: Vec<Arc<T>>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl<T: Send> GC<T> {
+// ....
+```
+
+[Rust playground link](https://play.rust-lang.org/?gist=f93df4abbcede883a82d0502ad813e36&version=stable&backtrace=0)
+
+Hoorary, the `Send` error is gone!
+Unfortunately, we still have the issue with `Sync`.
+Let's look more closely at the error we are getting:
+
+```
+error[E0277]: the trait bound `T: std::marker::Sync` is not satisfied
+   --> <anon>:154:25
+    |
+154 |         let gc_thread = thread::spawn(gc);
+    |                         ^^^^^^^^^^^^^ the trait `std::marker::Sync` is not implemented for `T`
+    |
+    = help: consider adding a `where T: std::marker::Sync` bound
+    = note: required because of the requirements on the impl of `std::marker::Send` for `std::sync::Arc<T>`
+    = note: required because of the requirements on the impl of `std::marker::Send` for `std::ptr::Unique<std::sync::Arc<T>>`
+    = note: required because it appears within the type `alloc::raw_vec::RawVec<std::sync::Arc<T>>`
+    = note: required because it appears within the type `std::vec::Vec<std::sync::Arc<T>>`
+    = note: required because of the requirements on the impl of `std::marker::Send` for `&mut std::vec::Vec<std::sync::Arc<T>>`
+    = note: required because it appears within the type `[closure@<anon>:143:18: 151:10 pool:&mut std::vec::Vec<std::sync::Arc<T>>]`
+    = note: required by `std::thread::spawn`
 
 error: aborting due to previous error
 ```
 
-Oops, this isn't good.
+This error is really confusing, and my solution for it is not going to be much better, but bear with me.
+The origin of this error is the `Arc<T>`.
+If we want an `Arc<T>` to implement `Send`, the `T` contained in it must implement BOTH `Send` and `Sync`.
+This is because the data the `Arc<T>` is holding will be shared by anyone who can access the `Arc<T>`.
 
-Let's try to break this down (emphasis mine):
+We could add the `Sync` constraint to our type `T` to resolve this problem, but does this really make any sense?
+Nowhere in our application will a message be accessible by more than one thread at a time.
 
-<!--
+When the UI thread creates a new message, it immediately lets go of all of its access to the underlying data, by moving the value into the channel.
+Once the realtime thread gets a hold of the data, it will be the only thread that can access the data until the data needs to be freed.
+The GC also holds references to the underlying data, but it will never actually access the data, until it frees it.
+But, when the GC thread frees the memory holding the data, we know that there will be no other references to the memory in the program.
 
-## `memcpy` queue
-My first solution was the simplest thing I could come up with.
-I set up a fixed sized queue between the two threads.
-The queue sent complete lists of samples from the UI thread to the realtime thread.
-Here's (roughly) how this works:
+I might be wrong about this (please let me know if I am), but I think that we don't actually *need* the type `T` to be `Sync`.
+The compiler will never let us get away with this (because it doesn't know all of these properties, but we can let it know that it should trust us), with a new struct:
 
-* The UI thread notices it needs to handle some UI event
-* The UI thread recomputes the list of samples and stores them on it's stack
-* The UI thread sends the samples to the other thread over the queue (`memcpy` the samples into the queue's buffer)
-* Every time the realtime callback is called, it checks the queue for new messages.
-* If there are new messages, the samples are `memcpy`ed out of the queue's buffer, into the callback's private buffer (which also lives on the stack).
-
-For a crappy slide show demonstrating this process, [click here](/img/sound/memcpy_queue.pdf).
-To get this right, we must be careful with the queue that we use.
-
-First, the queue must not use locks to send messages back and forth.
-This we can deal with pretty easily; there are many good lock free queue and ringbuffer implementations.
-
-Second, we must be pretty careful about allocation.
-Many queues will create a new "queue node" to hold the data placed on the queue.
-When the data is pulled from the queue, the node is deallocated.
-We cannot deallocate any queue nodes in the realtime thread.
-We also probably shouldn't leak the nodes either, so we need to be careful about allocation of queue nodes.
-
-If we are sure to preallocate everything that the queue will need, and we use a good lock free queue implementation, we get around both of these issues.
-
-Finally, note that it I am totally fine letting the UI thread wait for for space in the queue if the realtime thread is not consuming events fast enough.
-I'm assuming that my UI thread is not going to be generating events significantly faster than the realtime thread can consume them.
-If it does, there are ways to work around this on the UI thread which I will not get into now (maybe in a future post).
-
-It looks like we can probably pull this off.
-`memcpy` is pretty fast, so we can probably afford to do a large `memcpy` in the realtime thread every once and a while, but it's not a very good idea to do something slow at effectively random times in the realtime thread.
-It also just feels wrong to make so many copies.
-I'm sure we can do better.
-
-## Pointer queue
-All problems in computer science can be solved by adding a layer of indirection (or so they say).
-Let's try to get rid of all of these copies with pointers!
-We will heap allocate some samples samples on the UI thread, populate them, then pass a pointer to those samples to the realtime thread.
-Again, we need to use a carefully constructed, bounded, lock-free queue.
-
-When there is a message available for the realtime thread, all it has to do is swap its `current` pointer with the new pointer that came over the queue.
-
-But wait!
-What will we do with the previous list of samples?
-We can't free this memory in the realtime thread, and we definitely don't want to leak it, so we need to send it to some other thread to be freed (or reused).
-Let's just send the memory back to the UI thread, then let the UI thread deal with it (perhaps it can even reuse the memory).
-
-This seems plausible, but there are some complications we must work around:
-1. We cannot use an unbounded queue to send samples from the realtime thread to the UI thread.
-    * As far as I know, there are no unbounded queues which do not perform allocation when sending messages.
-2. We cannot use a blocking, bounded queue to send the memory back to the UI thread.
-
-TODO this might actually be doable
-
-To understand the first of these, consider this scenario.
-If the queue is full, we will have to wait until there is room on the queue to push the new pointers.
-Remember that the UI thread is not running in realtime.
-It might not have been run by the scheduler recently, so it may not have had a chance to drain the queue the next time the realtime thread
-
-* We cannot cache the pointers in the realtime thread when the queue is full
-    * The cache of pointers would need to be unbounded (the required size is non-deterministic).
-        * In order to create an unbounded list of something, we need to allocate.
-
-### Double buffering
-If we get rid of the queue and replace it with two pointers, we swap between the two states with some atomic operations.
-[JackAtomicState.h](https://github.com/jackaudio/jack2/blob/364159f8212393442670b9c3b68b75aa39d98975/common/JackAtomicState.h) is an example of such a thing.
-Unfortunately, we must keep in mind that the UI thread is not realtime.
-If we want to avoid leaks, we must make sure that we never overwrite something before it is freed.
-
-I'm sure there are some ways to work around all the double buffering/pointer queue issues, but frankly, I don't want to, my gut and a few hours of thought have declared any solutions I've come up with too complicated for comfort.
-
-# A "Garbage Collector"
-At this point, I considered shipping reference counted objects around to manage these issues (and use the reference count to figure out when to free them).
-I wasn't totally confident that this was a good idea, until I watched the [cppcon video](https://www.youtube.com/watch?v=boPEO2auJj4), in which the speaker builds a simple "garbage collector" for `std::shared_ptr` and says "yes this is a good idea."
-
-Here begins the discussion about how I've done the same thing in rust.
-
-TODO touchy bit about page faults
-
-# rust stuff
-
-{% highlight rust %}
-#![feature(arc_counts)]
-
-use std::sync::mpsc::SyncSender;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time;
-
+```rust
 struct TrustMe<T> {
-    pub data: T
+    pub inner: T
 }
 
-//unsafe impl<T> Sync for TrustMe<T> {}
 unsafe impl<T> Send for TrustMe<T> {}
+```
 
-/// Doesn't do anything with the pointer until it has no references other than itself
-struct GC<T: Send + 'static> {
-    pool: Arc<Mutex<Vec<TrustMe<Arc<T>>>>>,
-    thread: Option<thread::JoinHandle<()>>,
-    notify: SyncSender<bool>,
+This will tell the compiler "yes, this thing is `Send`", even when it actually isn't, so the implementation of the trait `Send` is unsafe.
+
+Now, we can create a `Send`able `TrustMe<Arc<T>>`, and the compiler will trust us when we share these `Arc<T>`s between threads.
+
+Now, lets add this to our GC:
+
+```rust
+/// A garbage collector for Arc<T> pointers
+struct GC<T: Send> {
+    pool: Vec<TrustMe<Arc<T>>>,
+    thread: thread::JoinHandle<()>,
 }
 
-impl<T: Send + 'static> GC<T> {
+impl<T: Send> GC<T> {
+    // private. cleans up any dead pointers in a pool
+    fn cleanup(pool: &mut Vec<TrustMe<Arc<T>>>) {
+        pool.retain(|e: &TrustMe<Arc<_>>| {
+            if Arc::strong_count(&e.inner) > 1 {
+                return true
+            } else {
+                return false
+            }
+        });
+    }
+
     pub fn new() -> Self {
-        let pool = Arc::new(Mutex::new(Vec::new()));
+        let mut pool = Vec::new();
 
-        let (rx, tx) = mpsc::sync_channel(0);
-
-        let tpool = pool.clone();
-        let gc = move || {
+        // create a closure which will become a new thread
+        let gc = || {
             loop {
-                match tx.try_recv() {
-                    Ok(_)  => break,
-                    Err(_) => ()
-                };
+                GC::cleanup(&mut pool);
 
-                let mut pool = tpool.lock().unwrap();
-                pool.retain(|e: &TrustMe<Arc<_>>| {
-                    if Arc::strong_count(&e.data) > 1 {
-                        return true
-                    } else {
-                        println!("doing a drop");
-                        return false
-                    }
-                });
-
-                let ten_millis = time::Duration::from_millis(10);
-                thread::sleep(ten_millis);
+                // wait for 100 milliseconds, then scan again
+                let sleep = std::time::Duration::from_millis(100);
+                thread::sleep(sleep);
             }
         };
 
+        // spawns a new thread and returns a handle to the thread
         let gc_thread = thread::spawn(gc);
 
         GC {
-            pool: pool,
-            thread: Some(gc_thread),
-            notify: rx,
+            pool:   pool,
+            thread: gc_thread
         }
     }
 
     pub fn track(&mut self, t: Arc<T>) {
-        let mut p = self.pool.lock().unwrap();
-        let trust = TrustMe { data: t };
-        p.push(trust);
+        let t = TrustMe { inner: t };
+        self.pool.push(t);
     }
 }
+```
 
-impl<T: Send + 'static> Drop for GC<T> {
-    fn drop(&mut self) {
-        println!("collector going down!");
-        self.notify.send(true).unwrap();
+[Rust Playground Link](https://play.rust-lang.org/?gist=8dc636cece12ee94a24ce4b49e02ff13&version=stable&backtrace=0)
 
-        let t = self.thread.take();
-        match t {
-            Some(t) => t.join().unwrap(),
-            None    => ()
-        }
-    }
-}
+When we try to compile this, we get YET ANOTHER compiler error.
+This time, the compiler is whining about "the parameter type `T` may not live long enough".
+This is another error message which initially is **extremely** frustrating, but we can give Rust some credit.
+The new thread that we have created could run until the termination of the program, so any data which the thread might be holding onto also must be able to live until the termination of the program.
 
-struct LoudDrop { }
-impl LoudDrop {
-    pub fn new() -> Self { LoudDrop {} }
-}
+The compiler is telling us that we need to add a "lifetime specifier" to our type `T`.
+In this case, it is telling us that we must specify that the lifetime of the type `T`s which are managed by the GC can be the entire duration of the program.
+This might seem excessive, but, it is not possible for the compiler to determine when in the program our thread will terminate (if it could we would have solved the halting problem), so the maximum lifetime MUST potentially be the entire duration of the program.
+Note that, this doesn't mean that all the values stored in the GC will necessarily live for the entire lifetime of the program (if they did, we wouldn't be cleaning up garbage).
+This condition just means that they might live that long.
 
-impl Drop for LoudDrop {
-    fn drop(&mut self) {
-        println!("being dropped")
-    }
-}
+Anyway, we can now add the `+ 'static` specifier the compiler has asked us to add, and try to compile this one more time.
 
-fn main() {
-    let mem = Arc::new(LoudDrop::new());
-    {
-        let mut collector = GC::<LoudDrop>::new();
-        collector.track(mem.clone());
+```rust
+/// A garbage collector for Arc<T> pointers
+struct GC<T: Send + 'static> {
 
-        {
-            let mem = Arc::new(LoudDrop::new());
-            collector.track(mem.clone());
+// ...
 
-            let ten_millis = time::Duration::from_millis(1000);
-            thread::sleep(ten_millis);
-        }
+impl<T: Send + 'static> GC<T> {
 
-        let ten_millis = time::Duration::from_millis(1000);
-        thread::sleep(ten_millis);
-    }
-}
-{% endhighlight %}
+// ...
+```
 
--->
+GUESS WHAT IT DIDN'T WORK.
