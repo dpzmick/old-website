@@ -12,6 +12,9 @@ I will not explain all of the details needed to implement your own synth from sc
 * [Audio programming 101](/2016/12/17/audio-basics/)
     * Defines digital audio and types of audio applications
     * Discusses some of the nuances of digital audio programming
+* ["Garbage collection" for Rust Arc Pointers](/2017/01/23/rust-arc-gc-realtime/)
+    * Discussion about messaging between realtime and non-realtime threads
+    * Walk through the construction of a "Garbage Collector" for blocks of memory which must be sent between threads.
 
 <!--
 * [Garbage collection for Arc pointers](/2016/11/19/rust-arc-gc-realtime/)
