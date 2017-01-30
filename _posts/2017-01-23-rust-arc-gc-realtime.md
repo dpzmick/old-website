@@ -1034,3 +1034,5 @@ I'm glad to be exposed to potential issues, even if I have to work around the co
 
 If you made it this far, thank you for reading.
 I hope you've learned something interesting (maybe even useful).
+
+Discussion on [reddit](https://www.reddit.com/r/rust/comments/5qxqo8/show_and_ask_rrust_garbage_collection_for_rust/).
