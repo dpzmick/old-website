@@ -43,7 +43,7 @@ It is totally fine to allocate on the UI thread, so when the UI thread handles a
 Then we will ship this message over to the realtime thread.
 
 When the realtime thread takes ownership of the message, it will need to hold onto the data for some undefined period of time.
-But, when the realtime thread is done with the message, it cannot free it.
+But, when the realtime thread is done with the message, it cannot free it (because we can't allocate or deallocatein the realtime thread).
 
 To solve this, let's run one more thread to clean up messages which are no longer being used by the realtime thread.
 
@@ -62,15 +62,15 @@ Note that anything I have to say should be taken with grain of salt; I haven't b
 
 First, let's talk about when we would not want to use this approach.
 
-If the realtime thread always consumes new messages in a predictable amount of time, we can preallocate a fixed size buffer to hold onto "in flight" UI messages.
+If the realtime thread always consumes new messages in a predictable amount of time, we can preallocate a certain number of messages and just keep reusing the same blocks of memory.
 When the UI needs to send a message it can grab one of the preallocated messages and use it.
-Some predictable amount of time later, the message can be returned to the pool.
+Some predictable amount of time later, when the realtime thread is done with it, the message can be returned to the pool (by the realtime thread).
 
 This is also a bad idea if the UI thread generates messages significantly faster than the realtime thread consumes them.
 It might be fine for the realtime thread to lag behind the UI thread (if it eventually catches up), but the GC pointer list is going to get quite large.
 If we do our GC scan frequently, we will be using a lot of cpu time scanning this list.
 If we slow the collector down, the list is going to keep growing, and so will our memory usage.
-In other words, its a sticky situation.
+In other words, it's a sticky situation.
 A modern computer can probably handle this load, but we should avoid generating more load than necessary so that other audio applications running at the same time can use as much time as they need.
 
 Finally, if the realtime thread needs to send a message to the UI thread, it can't just allocate memory and toss it at the GC thread for cleanup later.
@@ -83,10 +83,11 @@ So, if we don't need something more clever, maybe this is a good thing to try ou
 Finally, since we are using reference counting to manage memory, there will be some runtime cost to increment and decrement the reference counts.
 This isn't a big deal for us, in this case, because the performance is predictable (we won't be suddenly surprised by the non-deterministic reference count incrementing).
 
+There are many other variations of this technique (some which involve extra threads, some which don't, some which reuse freed memory, etc).
 Regardless of the actual efficacy of this approach, it will be interesting to try to build one in Rust, so let's get started.
 
 # Let's make one
-For the sake of these examples, let's assume that the built in Rust [mpsc channel](https://doc.rust-lang.org/std/sync/mpsc/index.html) is an appropriate lock free queue.
+For the sake of these examples, let's assume that the built-in Rust [mpsc channel](https://doc.rust-lang.org/std/sync/mpsc/index.html) is an appropriate lock free queue.
 It will be pretty easy to swap this with something different later, and, if we use the standard library, all of the examples will easily run in the Rust playground.
 We are also going to fake a bunch of the details of the audio library.
 
@@ -413,7 +414,7 @@ We can't let our realtime callback perform memory allocation.
 
 # Build the GC
 
-We now need to build the GC thread, to clean up after us, outside of the realtime thread.
+We now need to build the GC that I promised we would build, to clean up after us, outside of the realtime thread.
 Sneak peak, once the GC is implemented, all we have to change is `UIThread::run`, in a very small way:
 
 ```rust
@@ -571,7 +572,7 @@ fn main() {
 }
 ```
 
-We written a bunch of new code, better make sure it compiles ([Rust playground](https://play.rust-lang.org/?gist=0740c7896b0dd8c37e1d57aa9e53ca0b&version=stable&backtrace=0)):
+We've written a bunch of new code, better make sure it compiles ([Rust playground](https://play.rust-lang.org/?gist=0740c7896b0dd8c37e1d57aa9e53ca0b&version=stable&backtrace=0)):
 
 ```rust
 error[E0277]: the trait bound `T: std::marker::Send` is not satisfied
