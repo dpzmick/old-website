@@ -4,15 +4,13 @@ title: About Me
 permalink: /about/
 ---
 
-I'm a Computer Science student at the University of Illinois interested in
-programming languages, operating systems, high performance computing, and quite
-a few other things.
+I am currently a software engineer at [Jump
+Trading](http://jumptrading.com).
+
+My interests include programming language theory and design, compilers, operating systems, high performance scientific computing, and a quite a few other things.
+
+I have managed to earn a Computer Science University of Illinois, with a minor in Math.
 
 Check out my [undergraduate senior thesis](http://dpzmick.com/ugrad-thesis/paper.pdf).
 
-After graduation I am planning to work for [Jump
-Trading](http://jumptrading.com).
-
-For some of my work, check out [ my github ]( http://github.com/dpzmick ) or, if
-you want to look at something pretty, here are some of my [ photographs ](
-http://flickr.com/photos/dz0004455 )
+For some of my projects, check out [my github](http://github.com/dpzmick) or [my Resume](http://dpzmick.com/resume/resume.pdf).

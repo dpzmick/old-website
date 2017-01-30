@@ -8,7 +8,7 @@ url:         "http://dpzmick.com"
 resume:      "http://dpzmick.com/resume/resume.pdf"
 
 # Google analytics
-google_analytics:
+google_analytics: UA-40842690-1
 
 # Optional features
 animated:           false
