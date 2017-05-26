@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "Outsmarting the compiler"
-description: ""
+description: "Can you?"
 category:
 tags: []
 ---
