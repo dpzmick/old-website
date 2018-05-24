@@ -39,5 +39,8 @@ paginate:     20
 sass:
   compressed: true
 
-gems: [jekyll-paginate]
+plugins:
+  - jekyll-paginate
+  - jekyll-redirect-from
+
 host: 0.0.0.0
