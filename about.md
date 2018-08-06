@@ -16,5 +16,7 @@ I like to play drums and am toying with piano.
 According to most of my friends, my music taste is best characterized as "pretentious."
 Interpret that as you wish.
 Regardless, I love to talk about music so talk to me about it.
+I've also recently begun playing around with modular synthesizers.
+There are some videos of this [on youtube](https://www.youtube.com/channel/UCYkk_c66qufhHQBpM5wwLaQ).
 
-For some of my projects, check out [my github](http://github.com/dpzmick) or [my Resume](http://dpzmick.com/resume/resume.pdf).
+For some of my personal projects, check out [my github](http://github.com/dpzmick) or [my Resume](http://dpzmick.com/resume/resume.pdf).
